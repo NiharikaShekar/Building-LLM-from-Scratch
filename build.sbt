@@ -21,9 +21,9 @@ lazy val root = project
       "org.nd4j" % "nd4j-native-platform" % "1.0.0-M2.1",
       "org.nd4j" % "nd4j-native" % "1.0.0-M2.1" classifier "macosx-arm64",
       "org.slf4j" % "slf4j-simple" % "2.0.13", // Optional logging
-      "org.scalatest" %% "scalatest" % "3.2.14",
-      "junit" % "junit" % "4.13.2" ,
-      "org.mockito" %% "mockito-scala" % "1.17.7"
+      "org.scalatest" %% "scalatest" % "3.2.14"% "test",
+      "junit" % "junit" % "4.13.2" % "test",
+      "org.mockito" %% "mockito-scala" % "1.17.7"% "test"
     ),
 
     assembly / assemblyMergeStrategy := {
