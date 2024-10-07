@@ -1,4 +1,4 @@
-import Token_Embeddings.config
+import com.typesafe.config.ConfigFactory
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.io.{LongWritable, Text}
@@ -11,15 +11,14 @@ import scala.jdk.CollectionConverters._
 import com.knuddels.jtokkit.Encodings
 import com.knuddels.jtokkit.api.EncodingType
 import org.slf4j.LoggerFactory
-import com.typesafe.config.ConfigFactory
 
 object TokenID_Generation {
 
   // Initializing SLF4J Logger
   private val logger = LoggerFactory.getLogger(TokenID_Generation.getClass)
 
-  private val config = ConfigFactory.load
-  private val environment = config.getString("common");
+  private val config = ConfigFactory.load()
+  private val environment = config.getString("environment")
 
   // Utility object for encoding using CL100K_BASE
   object TokenEncoder {
@@ -69,21 +68,16 @@ object TokenID_Generation {
 
   // Main method is defined here
   def main(args: Array[String]): Unit = {
-    if (args.length != 2) {
-      logger.error("Invalid arguments: Usage: <input path> <output path>")
-      return
-    }
-
     // Logging job configuration details
-    logger.info(s"Configuring job with input path: ${args(0)} and output path: ${args(1)}")
+    logger.info(s"Configuring job with environment: $environment")
 
     // Status of Job
     try {
       val conf = new Configuration()
-      val job = Job.getInstance(conf, "TokenFrequencyJob")
+      val job = Job.getInstance(conf, config.getString(s"$environment.job.name"))
       job.setJarByClass(this.getClass)
 
-      configureJob(job, args(0), args(1))
+      configureJob(job)
 
       logger.info("Job starting...")
       val success = job.waitForCompletion(true)
@@ -99,7 +93,7 @@ object TokenID_Generation {
   }
 
   // Method for Job Configuration
-  def configureJob(job: Job, inputPath: String, outputPath: String): Unit = {
+  def configureJob(job: Job): Unit = {
     job.setOutputKeyClass(classOf[Text])
     job.setOutputValueClass(classOf[Text])
 
@@ -111,8 +105,8 @@ object TokenID_Generation {
     job.setInputFormatClass(classOf[TextInputFormat])
     job.setOutputFormatClass(classOf[TextOutputFormat[Text, Text]])
 
-    FileInputFormat.addInputPath(job, new Path(inputPath))
-    FileOutputFormat.setOutputPath(job, new Path(outputPath))
+    FileInputFormat.addInputPath(job, new Path(config.getString(s"$environment.inputPath")))
+    FileOutputFormat.setOutputPath(job, new Path(config.getString(s"$environment.outputPath")))
 
     // Set the split size from config
     FileInputFormat.setMaxInputSplitSize(job, config.getLong(s"$environment.mapreduce.input.fileinputformat.split.maxsize"))

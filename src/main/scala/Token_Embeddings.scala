@@ -1,8 +1,11 @@
 import com.knuddels.jtokkit.Encodings
 import com.knuddels.jtokkit.api.{Encoding, EncodingType}
+import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.io._
-import org.apache.hadoop.mapred._
+import org.apache.hadoop.mapreduce._
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
 import org.deeplearning4j.nn.conf.layers.{EmbeddingLayer, OutputLayer}
 import org.deeplearning4j.nn.conf.{MultiLayerConfiguration, NeuralNetConfiguration}
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork
@@ -13,27 +16,23 @@ import org.nd4j.linalg.lossfunctions.LossFunctions
 import org.slf4j.LoggerFactory
 import com.typesafe.config.ConfigFactory
 
-import java.io.IOException
 import scala.jdk.CollectionConverters._
 
 object Token_Embeddings {
 
   private val log = LoggerFactory.getLogger(getClass) // Logger instance
-  private val config = ConfigFactory.load
+  private val config = ConfigFactory.load()
+  private val environment = config.getString("environment")
 
   // This is the mapper class which generates token embeddings after getting the TokenIDs
-  class EmbeddingMapper extends MapReduceBase with Mapper[LongWritable, Text, Text, Text] {
+  class EmbeddingMapper extends Mapper[LongWritable, Text, Text, Text] {
     private val outputKey = new Text() // Output key for the mapper
-    private var output: OutputCollector[Text, Text] = _ // Define output collector
     private lazy val encoding: Encoding = Encodings.newDefaultEncodingRegistry().getEncoding(EncodingType.CL100K_BASE) // TokenIDs generation
 
     // Logging initialization of the mapper
     log.info("EmbeddingMapper initialized.")
 
-    @throws[IOException]
-    override def map(key: LongWritable, value: Text, output: OutputCollector[Text, Text], reporter: Reporter): Unit = {
-      this.output = output  // Store the output collector
-
+    override def map(key: LongWritable, value: Text, context: Mapper[LongWritable, Text, Text, Text]#Context): Unit = {
       // Split input value into sentences
       val sentences = value.toString.split("\n").toList
 
@@ -56,7 +55,7 @@ object Token_Embeddings {
 
       // Getting learned embeddings and writing them to output
       val embeddings: INDArray = model.getLayer(0).getParam("W")
-      writeEmbeddingsToOutput(flattenedTokens, embeddings)
+      writeEmbeddingsToOutput(flattenedTokens, embeddings, context)
     }
 
     // Creating the neural network model
@@ -92,21 +91,21 @@ object Token_Embeddings {
     }
 
     // Writing embeddings to the output
-    private def writeEmbeddingsToOutput(tokens: List[Integer], embeddings: INDArray): Unit = {
+    private def writeEmbeddingsToOutput(tokens: List[Integer], embeddings: INDArray, context: Mapper[LongWritable, Text, Text, Text]#Context): Unit = {
       tokens.foreach(tokenId => {
         val word = encoding.decode(java.util.List.of(tokenId)) // Decoding token ID to word
         outputKey.set(s"$word\t$tokenId") // Setting output key as "word tokenId"
         // Collect the embeddings for each token
-        output.collect(outputKey, new Text(embeddings.getRow(tokenId.longValue()).toStringFull))
+        context.write(outputKey, new Text(embeddings.getRow(tokenId.longValue()).toStringFull))
       })
     }
   }
 
   // Reducer class calculates the average embeddings here
-  class EmbeddingReducer extends MapReduceBase with Reducer[Text, Text, Text, Text] {
-    override def reduce(key: Text, values: java.util.Iterator[Text], output: OutputCollector[Text, Text], reporter: Reporter): Unit = {
-      val average = calculateAverage(values) // Calculating average embeddings
-      output.collect(key, new Text(average.mkString("[", ", ", "]"))) // Collecting the average embedding
+  class EmbeddingReducer extends Reducer[Text, Text, Text, Text] {
+    override def reduce(key: Text, values: java.lang.Iterable[Text], context: Reducer[Text, Text, Text, Text]#Context): Unit = {
+      val average = calculateAverage(values.asScala.toSeq) // Calculating average embeddings
+      context.write(key, new Text(average.mkString("[", ", ", "]"))) // Collecting the average embedding
     }
   }
 
@@ -120,79 +119,52 @@ object Token_Embeddings {
   }
 
   // This is a method to calculate average embedding from iterator
-  def calculateAverage(iterator: java.util.Iterator[Text]): Array[Float] = {
-    var sumArray: Array[Float] = Array.empty
-    var count = 0
-
-    while (iterator.hasNext) {
-      val currentArray = parseArray(iterator.next())
-
-      // Initializing sumArray if it's empty
-      if (sumArray.isEmpty) {
-        sumArray = new Array[Float](currentArray.length)
-      }
-
-      // Sum the arrays
-      for (i <- currentArray.indices) {
-        sumArray(i) += currentArray(i)
-      }
-
-      count += 1
-    }
-
-    // Calculating the average
-    for (i <- sumArray.indices) {
-      sumArray(i) /= count
-    }
-
-    sumArray
+  def calculateAverage(values: Seq[Text]): Array[Float] = {
+    val arrays = values.map(parseArray)
+    val sumArray = arrays.reduce((a, b) => a.zip(b).map { case (x, y) => x + y })
+    sumArray.map(_ / arrays.length)
   }
 
-  // This is a method to run the embedding process
-  def embeddingMain(inputPath: String, outputPath: String): RunningJob = {
-    val conf = new JobConf(this.getClass)
-
-    // Set configuration from application.conf
-    val environment = config.getString("common");
-    conf.setJobName(config.getString(s"$environment.embedding.name"))
-    conf.set(s"$environment.fs.defaultFS", config.getString(s"$environment.fs.defaultFS"))
-    conf.setNumReduceTasks(config.getInt(s"$environment.mapreduce.job.reduces"))
-
-    conf.setOutputKeyClass(classOf[Text])
-    conf.setOutputValueClass(classOf[Text])
-    conf.setMapperClass(classOf[EmbeddingMapper])
-    conf.setReducerClass(classOf[EmbeddingReducer])
-    conf.setInputFormat(classOf[TextInputFormat])
-    conf.setOutputFormat(classOf[TextOutputFormat[Text, Text]])
-
-    FileInputFormat.setInputPaths(conf, new Path(inputPath))
-    FileOutputFormat.setOutputPath(conf, new Path(outputPath))
-
-    // Set the split size from config
-    //    FileInputFormat.set(conf, config.getLong(s"$environment.mapreduce.input.fileinputformat.split.maxsize"))
-    conf.set("mapreduce.input.fileinputformat.split.maxsize", config.getString(s"$environment.mapreduce.input.fileinputformat.split.maxsize"));
-
-    JobClient.runJob(conf)
-  }
-
-  //Main method is defined here
+  // Main method is defined here
   def main(args: Array[String]): Unit = {
     try {
-      val environment = config.getString("common");
-      val inputPath = config.getString(s"$environment.inputPath")
-      val outputPath = config.getString(s"$environment.outputPath")
-
       log.info(s"Starting embedding job in $environment environment")
-      log.info(s"Input path: $inputPath")
-      log.info(s"Output path: $outputPath")
+      log.info(s"Input path: ${config.getString(s"$environment.inputPath")}")
+      log.info(s"Output path: ${config.getString(s"$environment.outputPath")}")
 
-      embeddingMain(inputPath, outputPath)
+      val conf = new Configuration()
+      val job = Job.getInstance(conf, config.getString(s"$environment.embedding.name"))
+      job.setJarByClass(this.getClass)
 
-      log.info("Embedding job completed successfully")
+      configureJob(job)
+
+      log.info("Embedding job starting...")
+      val success = job.waitForCompletion(true)
+      if (success) {
+        log.info("Embedding job completed successfully")
+      } else {
+        log.error("Embedding job failed to complete")
+      }
     } catch {
       case e: Exception =>
         log.error("Error during embedding job execution", e)
         throw e
     }
+  }
+
+  // Method for Job Configuration
+  def configureJob(job: Job): Unit = {
+    job.setOutputKeyClass(classOf[Text])
+    job.setOutputValueClass(classOf[Text])
+    job.setMapperClass(classOf[EmbeddingMapper])
+    job.setReducerClass(classOf[EmbeddingReducer])
+
+    job.setNumReduceTasks(config.getInt(s"$environment.mapreduce.job.reduces"))
+
+    FileInputFormat.addInputPath(job, new Path(config.getString(s"$environment.inputPath")))
+    FileOutputFormat.setOutputPath(job, new Path(config.getString(s"$environment.outputPath")))
+
+    // Set the split size from config
+    FileInputFormat.setMaxInputSplitSize(job, config.getLong(s"$environment.mapreduce.input.fileinputformat.split.maxsize"))
   }
 }
